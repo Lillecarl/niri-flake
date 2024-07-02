@@ -4,11 +4,12 @@
   lib,
   docs,
   binds,
+  settings,
   ...
 }:
 with lib;
-with docs.lib; rec {
-  module = let
+with docs.lib; {
+  type = let
     inherit (types) nullOr attrsOf listOf submodule enum;
 
     binds-stable = binds inputs.niri-stable;
@@ -33,6 +34,8 @@ with docs.lib; rec {
 
     attrs = type: optional (attrsOf type) {};
     list = type: optional (listOf type) [];
+
+    float-or-int = types.either types.float types.int;
 
     variant = variants:
       mkOptionType {
@@ -106,6 +109,32 @@ with docs.lib; rec {
           description = ''
             Further reading:
             - ${libinput-link "pointer-acceleration" "Pointer acceleration profiles"}
+          '';
+        };
+      scroll-method =
+        nullable (types.enum ["no-scroll" "two-finger" "edge" "on-button-down"])
+        // {
+          description = ''
+            When to convert motion events to scrolling events.
+            The default and supported values vary based on the device type.
+
+            Further reading:
+            - ${libinput-link "scrolling" "Scrolling"}
+          '';
+        };
+    };
+
+    pointer-tablet-common = {
+      enable = optional types.bool true;
+      left-handed =
+        optional types.bool false
+        // {
+          description = ''
+            Whether to accomodate left-handed usage for this device.
+            This varies based on the exact device, but will for example swap left/right mouse buttons.
+
+            Further reading:
+            - ${libinput-link "configuration" "Left-handed Mode"}
           '';
         };
     };
@@ -278,7 +307,7 @@ with docs.lib; rec {
               '';
             };
           width =
-            optional types.int 4
+            optional float-or-int 4
             // {
               description = ''
                 The width of the ${name} drawn around each ${window}.
@@ -345,6 +374,53 @@ with docs.lib; rec {
         inherit description;
       };
 
+    border-rule = {
+      name,
+      path,
+      description,
+      window,
+    }:
+      ordered-section [
+        {
+          enable =
+            nullable types.bool
+            // {
+              description = ''
+                Whether to enable the ${name}.
+              '';
+            };
+          width =
+            nullable float-or-int
+            // {
+              description = ''
+                The width of the ${name} drawn around each ${window}.
+              '';
+            };
+        }
+
+        {
+          active =
+            nullable (newtype (link-type "decoration") (decoration "${path}.active"))
+            // {
+              visible = "shallow";
+              description = ''
+                The color of the ${name} for the window that has keyboard focus.
+              '';
+            };
+          inactive =
+            nullable (newtype (link-type "decoration") (decoration "${path}.inactive"))
+            // {
+              visible = "shallow";
+              description = ''
+                The color of the ${name} for windows that do not have keyboard focus.
+              '';
+            };
+        }
+      ]
+      // {
+        inherit description;
+      };
+
     regex = newtype (plain-type "regular expression") types.str;
 
     match = newtype (plain-type "match rule") (ordered-record [
@@ -378,6 +454,17 @@ with docs.lib; rec {
               Every monitor has up to one active window, and `is-active=true` will match the active window on each monitor. A monitor can have zero active windows if no windows are open on it. There can never be more than one active window on a monitor.
             '';
           };
+        is-active-in-column =
+          nullable types.bool
+          // {
+            description = ''
+              When non-null, for this field to match a window, the value must match whether the window is active in its column or not.
+
+              Every column has exactly one active-in-column window. If it is the active column, this window is also the active window. A column may not have zero active-in-column windows, or more than one active-in-column window.
+
+              The active-in-column window is the window that was last focused in that column. When you switch focus to a column, the active-in-column window will be the new focused window.
+            '';
+          };
         is-focused =
           nullable types.bool
           // {
@@ -387,6 +474,15 @@ with docs.lib; rec {
               A note on terminology used here: a window is actually a toplevel surface, and a surface just refers to any rectangular region that a client can draw to. A toplevel surface is just a surface with additional capabilities and properties (e.g. "fullscreen", "resizable", "min size", etc)
 
               For a window to be focused, its surface must be focused. There is up to one focused surface, and it is the surface that can receive keyboard input. There can never be more than one focused surface. There can be zero focused surfaces if and only if there are zero surfaces. The focused surface does *not* have to be a toplevel surface. It can also be a layer-shell surface. In that case, there is a surface with keyboard focus but no *window* with keyboard focus.
+            '';
+          };
+      }
+      {
+        at-startup =
+          nullable types.bool
+          // {
+            description = ''
+              When true, this rule will match windows opened within the first 60 seconds of niri starting up. This is useful for setting up initial window positions and sizes.
             '';
           };
       }
@@ -446,11 +542,20 @@ with docs.lib; rec {
 
     section = flip pipe [record make-section];
     ordered-section = flip pipe [ordered-record make-section];
-
-    settings = ordered-record [
+  in
+    ordered-record [
       {
         binds = let
           base = record {
+            allow-when-locked =
+              optional types.bool false
+              // {
+                description = ''
+                  Whether this keybind should be allowed when the screen is locked.
+
+                  This is only applicable for `spawn` keybinds.
+                '';
+              };
             cooldown-ms =
               nullable types.int
               // {
@@ -528,7 +633,8 @@ with docs.lib; rec {
 
                   - `{ field :: type }`: This means that the action takes a named argument (in kdl, we call it a property). \
                     To pass such an argument, you should pass an attrset with the key and value. You can pass many properties in one attrset, or you can pass several attrsets with different properties. \
-                    Required fields are marked with `*` before their name, and if no fields are required, you can use the action without any arguments too (see `quit` in the example above).
+                    Required fields are marked with `*` before their name, and if no fields are required, you can use the action without any arguments too (see `quit` in the example above). \
+                    If a field is marked with `?`, then omitting it is meaningful. (without `?`, it will have a default value)
 
                   - `[type]`: This means that the action takes several arguments as a list. Although you can pass a list directly, it's more common to pass them as separate arguments. \
                     `spawn ["foo" "bar" "baz"]` is equivalent to `spawn "foo" "bar" "baz"`.
@@ -561,9 +667,11 @@ with docs.lib; rec {
                         else " (only on niri-unstable)";
                       type-names = {
                         LayoutSwitchTarget = ''"next" | "prev"'';
+                        WorkspaceReference = "u8 | string";
                         SizeChange = "size-change";
                         bool = "bool";
                         u8 = "u8";
+                        u16 = "u16";
                         String = "string";
                       };
 
@@ -580,7 +688,7 @@ with docs.lib; rec {
                           else params.type
                         ));
                         list = lambda "[${type-or params.type params.type}]";
-                        prop = lambda "{ ${optionalString (!params.use-default) "*"}${params.field} :: ${type-names.${params.type} or (warn "unhandled type `${params.type}`" params.type)} }";
+                        prop = lambda "{ ${optionalString (!params.use-default) "*"}${params.field}${optionalString params.none-important "?"} :: ${type-names.${params.type} or (warn "unhandled type `${params.type}`" params.type)} }";
                         unknown = ''
                           ${lambda "unknown"}
 
@@ -682,6 +790,57 @@ with docs.lib; rec {
         spawn-at-startup = list (record {
           command = list types.str;
         });
+      }
+
+      {
+        workspaces =
+          attrs (record {
+            name =
+              nullable types.str
+              // {
+                description = ''
+                  An (optional) name for the workspace. Defaults to the value of the key.
+
+                  This attribute is intended to be used when you wish to preserve a specific
+                  order for the named workspaces.
+                '';
+              };
+            open-on-output =
+              nullable types.str
+              // {
+                description = ''
+                  The name of the output the workspace should be assigned to.
+                '';
+              };
+          })
+          // {
+            description = ''
+              Declare named workspaces.
+
+              Named workspaces are similar to regular, dynamic workspaces, except they can be
+              referred to by name, and they are persistent, they do not close when there are
+              no more windows left on them.
+
+              Usage is like so:
+
+              ```nix
+              {
+                programs.niri.settings.workspaces."name" = {};
+                programs.niri.settings.workspaces."01-another-one" = {
+                  open-on-output = "DP-1";
+                  name = "another-one";
+                };
+              }
+              ```
+
+              Unless a `name` is declared, the workspace will use the attribute key as the name.
+
+              Workspaces will be created in a specific order: sorted by key. If you do not care
+              about the order of named workspaces, you can skip using the `name` attribute, and
+              use the key instead. If you do care about it, you can use the key to order them,
+              and a `name` attribute to have a friendlier name.
+            '';
+          };
       }
 
       {
@@ -792,7 +951,8 @@ with docs.lib; rec {
               };
           };
           touchpad =
-            (basic-pointer true)
+            pointer-tablet-common
+            // (basic-pointer true)
             // {
               tap =
                 optional types.bool true
@@ -827,6 +987,16 @@ with docs.lib; rec {
                     - ${libinput-link "palm-detection" "Disable-while-trackpointing"}
                   '';
                 };
+              disabled-on-external-mouse =
+                optional types.bool false
+                // {
+                  description = ''
+                    Whether to disable the touchpad when an external mouse is plugged in.
+
+                    Further reading:
+                    - ${libinput-link "configuration" "Send Events Mode"}
+                  '';
+                };
               tap-button-map =
                 nullable (enum ["left-middle-right" "left-right-middle"])
                 // {
@@ -855,9 +1025,13 @@ with docs.lib; rec {
                   '';
                 };
             };
-          mouse = basic-pointer false;
-          trackpoint = basic-pointer false;
-          tablet.map-to-output = nullable types.str;
+          mouse = pointer-tablet-common // basic-pointer false;
+          trackpoint = pointer-tablet-common // basic-pointer false;
+          tablet =
+            pointer-tablet-common
+            // {
+              map-to-output = nullable types.str;
+            };
           touch.map-to-output = nullable types.str;
           warp-mouse-to-focus =
             optional types.bool false
@@ -900,12 +1074,12 @@ with docs.lib; rec {
         outputs = attrs (record {
           enable = optional types.bool true;
           scale =
-            optional types.float 1.0
+            nullable float-or-int
             // {
               description = ''
                 The scale of this output, which represents how many physical pixels fit in one logical pixel.
 
-                Although this is a floating-point number, niri currently only accepts integer values. It does not support fractional scaling.
+                If this is null, niri will automatically pick a scale for you.
               '';
             };
           transform = {
@@ -963,6 +1137,16 @@ with docs.lib; rec {
                 By default, when this is null, niri will automatically pick a mode for you.
 
                 If this is set to an invalid mode (i.e unsupported by this output), niri will act as if it is unset and pick one for you.
+              '';
+            };
+
+          variable-refresh-rate =
+            optional types.bool false
+            // {
+              description = ''
+                Whether to enable variable refresh rate (VRR) on this output.
+
+                VRR is also known as Adaptive Sync, FreeSync, and G-Sync.
               '';
             };
         });
@@ -1088,7 +1272,7 @@ with docs.lib; rec {
                 '';
               };
             gaps =
-              optional types.int 16
+              optional float-or-int 16
               // {
                 description = ''
                   The gap between windows in the layout, measured in logical pixels.
@@ -1096,10 +1280,10 @@ with docs.lib; rec {
               };
             struts =
               section {
-                left = optional types.int 0;
-                right = optional types.int 0;
-                top = optional types.int 0;
-                bottom = optional types.int 0;
+                left = optional float-or-int 0;
+                right = optional float-or-int 0;
+                top = optional float-or-int 0;
+                bottom = optional float-or-int 0;
               }
               // {
                 description = ''
@@ -1127,11 +1311,9 @@ with docs.lib; rec {
             easing = record {
               duration-ms = required types.int;
               curve =
-                required (enum ["ease-out-quad" "ease-out-cubic" "ease-out-expo"])
+                required (enum ["linear" "ease-out-quad" "ease-out-cubic" "ease-out-expo"])
                 // {
                   description = ''
-                    ${unstable-enum ["ease-out-quad"]}
-
                     The curve to use for the easing function.
                   '';
                 };
@@ -1154,7 +1336,6 @@ with docs.lib; rec {
               stiffness = 1000;
               epsilon = 0.001;
             };
-            window-movement.unstable = true;
             window-movement.spring = {
               damping-ratio = 1.0;
               stiffness = 800;
@@ -1164,10 +1345,14 @@ with docs.lib; rec {
               duration-ms = 150;
               curve = "ease-out-expo";
             };
-            window-close.unstable = true;
             window-close.easing = {
               duration-ms = 150;
               curve = "ease-out-quad";
+            };
+            window-resize.spring = {
+              damping-ratio = 1.0;
+              stiffness = 800;
+              epsilon = 0.0001;
             };
           };
         in
@@ -1185,6 +1370,21 @@ with docs.lib; rec {
                 '';
               }))
             defaults)
+            {
+              shaders =
+                section {
+                  window-open = nullable types.str;
+                  window-close = nullable types.str;
+                  window-resize = nullable types.str;
+                }
+                // {
+                  description = ''
+                    These options should contain the *source code* for GLSL shaders.
+
+                    See: https://github.com/YaLTeR/niri/wiki/Configuration:-Animations#custom-shader
+                  '';
+                };
+            }
             {
               __module = {
                 config,
@@ -1294,6 +1494,17 @@ with docs.lib; rec {
                       If the final value is an output that does not exist, or it is null, then the window opens on the currently focused output.
                     '';
                   };
+                open-on-workspace =
+                  nullable types.str
+                  // {
+                    description = ''
+                      The workspace to open this window on.
+
+                      If the final value of this field is a named workspace that exists, the window will open on that workspace.
+
+                      If the final value of this is a named workspace that does not exist, or it is null, the window opens on the currently focused workspace.
+                    '';
+                  };
                 open-maximized =
                   nullable types.bool
                   // {
@@ -1370,6 +1581,48 @@ with docs.lib; rec {
                       Essentially, use `block-out-from = "screen-capture";` if you want to be sure that the window is never visible to any external tool no matter what; or use `block-out-from = "screencast";` if you want to be able to capture screenshots of the window without its contents normally being visible in a screencast. (at the risk of some tools still leaking the window contents, see above)
                     '';
                   };
+
+                geometry-corner-radius =
+                  nullable (record {
+                    top-left = required types.float;
+                    top-right = required types.float;
+                    bottom-right = required types.float;
+                    bottom-left = required types.float;
+                  })
+                  // {
+                    description = ''
+                      The corner radii of the window decorations (border and focus ring) in logical pixels.
+
+                      By default, the actual window surface will be unaffected by this.
+
+                      Set ${link' "programs.niri.settings.window-rules.*.clip-to-geometry"} to true to clip the window to its visual geometry, i.e. apply the corner radius to the window surface itself.
+                    '';
+                  };
+
+                clip-to-geometry =
+                  nullable types.bool
+                  // {
+                    description = ''
+                      Whether to clip the window to its visual geometry, i.e. whether the corner radius should be applied to the window surface itself or just the decorations.
+                    '';
+                  };
+
+                border = border-rule {
+                  name = "border";
+                  window = "matched window";
+                  path = "programs.niri.settings.window-rules.*.border";
+                  description = ''
+                    See ${link' "programs.niri.settings.layout.border"}.
+                  '';
+                };
+                focus-ring = border-rule {
+                  name = "focus ring";
+                  window = "matched window with focus";
+                  path = "programs.niri.settings.window-rules.*.focus-ring";
+                  description = ''
+                    See ${link' "programs.niri.settings.layout.focus-ring"}.
+                  '';
+                };
                 draw-border-with-background =
                   nullable types.bool
                   // {
@@ -1503,64 +1756,64 @@ with docs.lib; rec {
           };
       }
     ];
-  in
-    {config, ...}: let
-      cfg = config.programs.niri;
-    in {
-      options.programs.niri = {
-        config = mkOption {
-          type = types.nullOr (types.either types.str kdl.types.kdl-document);
-          default = render cfg.settings;
-          defaultText = null;
-          description = ''
-            The niri config file.
 
-            - When this is null, no config file is generated.
-            - When this is a string, it is assumed to be the config file contents.
-            - When this is kdl document, it is serialized to a string before being used as the config file contents.
+  module = {config, ...}: let
+    cfg = config.programs.niri;
+  in {
+    options.programs.niri = {
+      settings = mkOption {
+        type = types.nullOr settings.type;
+        default = null;
+        description = ''
+          Nix-native settings for niri.
 
-            By default, this is a KDL document that reflects the settings in ${link' "programs.niri.settings"}.
-          '';
-        };
+          By default, when this is null, no config file is generated.
 
-        finalConfig = mkOption {
-          type = types.nullOr types.str;
-          default =
-            if isString cfg.config
-            then cfg.config
-            else if cfg.config != null
-            then kdl.serialize.nodes cfg.config
-            else null;
-          readOnly = true;
-          defaultText = null;
-          description = ''
-            The final niri config file contents.
+          Beware that setting ${link' "programs.niri.config"} completely overrides everything under this option.
+        '';
+      };
 
-            This is a string that reflects the document stored in ${link' "programs.niri.config"}.
+      config = mkOption {
+        type = types.nullOr (types.either types.str kdl.types.kdl-document);
+        default = settings.render cfg.settings;
+        defaultText = null;
+        description = ''
+          The niri config file.
 
-            It is exposed mainly for debugging purposes, such as when you need to inspect how a certain option affects the resulting config file.
-          '';
-        };
+          - When this is null, no config file is generated.
+          - When this is a string, it is assumed to be the config file contents.
+          - When this is kdl document, it is serialized to a string before being used as the config file contents.
 
-        settings =
-          (nullable settings)
-          // {
-            description = ''
-              Nix-native settings for niri.
+          By default, this is a KDL document that reflects the settings in ${link' "programs.niri.settings"}.
+        '';
+      };
 
-              By default, when this is null, no config file is generated.
+      finalConfig = mkOption {
+        type = types.nullOr types.str;
+        default =
+          if isString cfg.config
+          then cfg.config
+          else if cfg.config != null
+          then kdl.serialize.nodes cfg.config
+          else null;
+        readOnly = true;
+        defaultText = null;
+        description = ''
+          The final niri config file contents.
 
-              Beware that setting ${link' "programs.niri.config"} completely overrides everything under this option.
-            '';
-          };
+          This is a string that reflects the document stored in ${link' "programs.niri.config"}.
+
+          It is exposed mainly for debugging purposes, such as when you need to inspect how a certain option affects the resulting config file.
+        '';
       };
     };
+  };
   fake-docs = {
     fmt-date,
     fmt-time,
     nixpkgs,
   }: {
-    imports = [module];
+    imports = [settings.module];
 
     options._ = let
       pkg-output = name: desc:
@@ -1777,9 +2030,17 @@ with docs.lib; rec {
           (flag' "natural-scroll" cfg.natural-scroll)
           (leaf "accel-speed" cfg.accel-speed)
           (nullable leaf "accel-profile" cfg.accel-profile)
+          (nullable leaf "scroll-method" cfg.scroll-method)
         ];
 
-        touchy = mapAttrsToList (nullable leaf);
+        pointer-tablet = cfg: inner: (toggle "off" cfg [
+          (flag' "left-handed" cfg.left-handed)
+          inner
+        ]);
+
+        touchy = cfg: [
+          (nullable leaf "map-to-output" cfg.map-to-output)
+        ];
 
         borderish = name: cfg:
           plain name [
@@ -1796,27 +2057,52 @@ with docs.lib; rec {
 
         preset-widths = map' plain (cfg: map (mapAttrsToList leaf) (toList cfg));
 
-        animation = map' plain (cfg: [
-          (flag' "off" (cfg == null))
-          (optional-node (cfg ? easing) [
-            (leaf "duration-ms" cfg.easing.duration-ms)
-            (leaf "curve" cfg.easing.curve)
-          ])
-          (nullable leaf "spring" cfg.spring or null)
-        ]);
+        animation = shader:
+          map' plain (cfg: [
+            (flag' "off" (cfg == null))
+            (optional-node (cfg ? easing) [
+              (leaf "duration-ms" cfg.easing.duration-ms)
+              (leaf "curve" cfg.easing.curve)
+            ])
+            (nullable leaf "spring" cfg.spring or null)
+            (nullable leaf "custom-shader" shader)
+          ]);
 
-        animation' = name: cfg: optional-node (cfg._internal_niri_flake.${name}.is-defined) (animation name cfg.${name});
+        animation' = shader: name: cfg: optional-node (cfg._internal_niri_flake.${name}.is-defined || shader != null) (animation shader name cfg.${name});
 
         opt-props = filterAttrs (const (value: value != null));
+        border-rule = name: cfg:
+          optional-node (opt-props cfg != {}) (
+            plain name [
+              (flag' "on" (cfg.enable == true))
+              (flag' "off" (cfg.enable == false))
+              (nullable leaf "width" cfg.width)
+              (nullable leaf "active-color" cfg.active.color or null)
+              (nullable leaf "active-gradient" cfg.active.gradient or null)
+              (nullable leaf "inactive-color" cfg.inactive.color or null)
+              (nullable leaf "inactive-gradient" cfg.inactive.gradient or null)
+            ]
+          );
+
+        corner-radius = cfg:
+          optional-node (cfg != null) (
+            leaf "geometry-corner-radius" [cfg.top-left cfg.top-right cfg.bottom-right cfg.bottom-left]
+          );
+
         window-rule = cfg:
           plain "window-rule" [
             (map (leaf "match") (map opt-props cfg.matches))
             (map (leaf "exclude") (map opt-props cfg.excludes))
             (nullable preset-widths "default-column-width" cfg.default-column-width)
             (nullable leaf "open-on-output" cfg.open-on-output)
+            (nullable leaf "open-on-workspace" cfg.open-on-workspace)
             (nullable leaf "open-maximized" cfg.open-maximized)
             (nullable leaf "open-fullscreen" cfg.open-fullscreen)
             (nullable leaf "draw-border-with-background" cfg.draw-border-with-background)
+            (corner-radius cfg.geometry-corner-radius)
+            (nullable leaf "clip-to-geometry" cfg.clip-to-geometry)
+            (border-rule "border" cfg.border)
+            (border-rule "focus-ring" cfg.focus-ring)
             (nullable leaf "opacity" cfg.opacity)
             (nullable leaf "min-width" cfg.min-width)
             (nullable leaf "max-width" cfg.max-width)
@@ -1844,9 +2130,17 @@ with docs.lib; rec {
 
         bind = name: cfg:
           node name (opt-props {
-            inherit (cfg) cooldown-ms;
-          }) [
+              inherit (cfg) cooldown-ms;
+            }
+            // (optionalAttrs cfg.allow-when-locked {
+              allow-when-locked = true;
+            })) [
             (mapAttrsToList leaf cfg.action)
+          ];
+
+        workspace = cfg:
+          node "workspace" cfg.name [
+            (nullable leaf "open-on-output" cfg.open-on-output)
           ];
       in [
         (plain "input" [
@@ -1862,17 +2156,18 @@ with docs.lib; rec {
             (leaf "repeat-rate" cfg.input.keyboard.repeat-rate)
             (leaf "track-layout" cfg.input.keyboard.track-layout)
           ])
-          (plain "touchpad" [
+          (plain "touchpad" (pointer-tablet cfg.input.touchpad [
             (flag' "tap" cfg.input.touchpad.tap)
             (flag' "dwt" cfg.input.touchpad.dwt)
             (flag' "dwtp" cfg.input.touchpad.dwtp)
+            (flag' "disabled-on-external-mouse" cfg.input.touchpad.disabled-on-external-mouse)
             (pointer cfg.input.touchpad)
             (nullable leaf "click-method" cfg.input.touchpad.click-method)
             (nullable leaf "tap-button-map" cfg.input.touchpad.tap-button-map)
-          ])
-          (plain "mouse" (pointer cfg.input.mouse))
-          (plain "trackpoint" (pointer cfg.input.trackpoint))
-          (plain "tablet" (touchy cfg.input.tablet))
+          ]))
+          (plain "mouse" (pointer-tablet cfg.input.mouse (pointer cfg.input.mouse)))
+          (plain "trackpoint" (pointer-tablet cfg.input.trackpoint (pointer cfg.input.trackpoint)))
+          (plain "tablet" (pointer-tablet cfg.input.tablet (touchy cfg.input.tablet)))
           (plain "touch" (touchy cfg.input.touch))
           (flag' "warp-mouse-to-focus" cfg.input.warp-mouse-to-focus)
           (flag' "focus-follows-mouse" cfg.input.focus-follows-mouse)
@@ -1883,10 +2178,11 @@ with docs.lib; rec {
         (mapAttrsToList (name: cfg:
           node "output" name [
             (toggle "off" cfg [
-              (leaf "scale" cfg.scale)
+              (nullable leaf "scale" cfg.scale)
               (map' leaf transform "transform" cfg.transform)
               (nullable leaf "position" cfg.position)
               (nullable (map' leaf mode) "mode" cfg.mode)
+              (flag' "variable-refresh-rate" cfg.variable-refresh-rate)
             ])
           ])
         cfg.outputs)
@@ -1921,18 +2217,31 @@ with docs.lib; rec {
         (plain "environment" (mapAttrsToList leaf cfg.environment))
         (plain "binds" (mapAttrsToList bind cfg.binds))
 
+        (map workspace (sort (a: b: a.sort-name < b.sort-name)
+          (mapAttrsToList (key: cfg:
+            cfg
+            // {
+              sort-name = key;
+              name =
+                if cfg.name != null
+                then cfg.name
+                else key;
+            })
+          cfg.workspaces)))
+
         (map (map' leaf (getAttr "command") "spawn-at-startup") cfg.spawn-at-startup)
         (map window-rule cfg.window-rules)
 
         (plain "animations" [
           (toggle "off" cfg.animations [
             (leaf "slowdown" cfg.animations.slowdown)
-            (animation' "workspace-switch" cfg.animations)
-            (animation' "horizontal-view-movement" cfg.animations)
-            (animation' "config-notification-open-close" cfg.animations)
-            (animation' "window-movement" cfg.animations)
-            (animation' "window-open" cfg.animations)
-            (animation' "window-close" cfg.animations)
+            (animation' null "workspace-switch" cfg.animations)
+            (animation' null "horizontal-view-movement" cfg.animations)
+            (animation' null "config-notification-open-close" cfg.animations)
+            (animation' null "window-movement" cfg.animations)
+            (animation' cfg.animations.shaders.window-open "window-open" cfg.animations)
+            (animation' cfg.animations.shaders.window-close "window-close" cfg.animations)
+            (animation' cfg.animations.shaders.window-resize "window-resize" cfg.animations)
           ])
         ])
 

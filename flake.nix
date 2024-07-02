@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-23.11";
+    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-24.05";
 
     flake-parts.url = "github:hercules-ci/flake-parts";
 
@@ -12,22 +12,23 @@
     niri-unstable.url = "github:YaLTeR/niri";
     niri-unstable.flake = false;
 
-    niri-stable.url = "github:YaLTeR/niri/v0.1.4";
+    niri-stable.url = "github:YaLTeR/niri/v0.1.7";
     niri-stable.flake = false;
+
+    xwayland-satellite.url = "github:Supreeeme/xwayland-satellite";
+    xwayland-satellite.flake = false;
   };
 
   outputs = inputs @ {
     self,
     flake-parts,
     crate2nix,
-    niri-unstable,
-    niri-stable,
     nixpkgs,
     nixpkgs-stable,
     ...
   }: let
     call = nixpkgs.lib.flip import {
-      inherit inputs kdl docs binds;
+      inherit inputs kdl docs binds settings;
       inherit (nixpkgs) lib;
     };
     kdl = call ./kdl.nix;
@@ -210,19 +211,6 @@
         inherit workspace;
       });
 
-    make-niri-stable = pkgs:
-      make-niri {
-        inherit pkgs;
-        src = niri-stable;
-        patches = [];
-      };
-
-    make-niri-unstable = pkgs:
-      make-niri {
-        inherit pkgs;
-        src = niri-unstable;
-      };
-
     validated-config-for = pkgs: package: config:
       pkgs.runCommand "config.kdl" {
         inherit config;
@@ -232,6 +220,45 @@
         niri validate -c $configPath
         cp $configPath $out
       '';
+
+    package-set = {
+      niri-stable = pkgs:
+        make-niri {
+          inherit pkgs;
+          src = inputs.niri-stable;
+          patches = [];
+        };
+      niri-unstable = pkgs:
+        make-niri {
+          inherit pkgs;
+          src = inputs.niri-unstable;
+        };
+      xwayland-satellite = pkgs: let
+        tools = crate2nix.tools.${pkgs.stdenv.system};
+        manifest = tools.generatedCargoNix {
+          src = inputs.xwayland-satellite;
+          name = "xwayland-satellite";
+        };
+        workspace = import manifest {
+          inherit pkgs;
+          buildRustCrateForPkgs = pkgs:
+            pkgs.buildRustCrate.override {
+              defaultCrateOverrides =
+                pkgs.defaultCrateOverrides
+                // (with pkgs; {
+                  xcb-util-cursor-sys = attrs: {
+                    nativeBuildInputs = [pkg-config rustPlatform.bindgenHook];
+                    buildInputs = [xcb-util-cursor];
+                  };
+                  xwayland-satellite = attrs: {
+                    version = "${attrs.version}-${inputs.xwayland-satellite.shortRev}";
+                  };
+                });
+            };
+        };
+      in
+        workspace.workspaceMembers.xwayland-satellite.build;
+    };
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       systems = ["x86_64-linux" "aarch64-linux"];
@@ -242,13 +269,12 @@
         system,
         ...
       }: {
-        packages = {
-          niri-unstable = make-niri-unstable inputs'.nixpkgs.legacyPackages;
-          niri-stable = make-niri-stable inputs'.nixpkgs.legacyPackages;
-
-          niri-unstable-for-nixos-stable = make-niri-unstable inputs'.nixpkgs-stable.legacyPackages;
-          niri-stable-for-nixos-stable = make-niri-stable inputs'.nixpkgs-stable.legacyPackages;
-        };
+        packages =
+          nixpkgs.lib.concatMapAttrs (name: make-for: {
+            "${name}" = make-for inputs'.nixpkgs.legacyPackages;
+            "${name}-for-nixos-stable" = make-for inputs'.nixpkgs-stable.legacyPackages;
+          })
+          package-set;
 
         apps = {
           niri-stable = {
@@ -315,20 +341,23 @@
       };
 
       flake = {
-        __docs = docs.make-docs (settings.fake-docs {inherit fmt-date fmt-time nixpkgs;});
-        inherit kdl;
-        overlays.niri = final: prev: {
-          niri-unstable = make-niri-unstable final;
-          niri-stable = make-niri-stable final;
+        kdl = nixpkgs.lib.warn "niri.kdl is deprecated. use niri.lib.kdl instead." kdl;
+        overlays.niri = with nixpkgs.lib; final: prev: mapAttrs (const (flip id final)) package-set;
+        lib = {
+          inherit kdl;
+          internal = {
+            inherit package-set make-niri validated-config-for;
+            docs-markdown = docs.make-docs (settings.fake-docs {inherit fmt-date fmt-time nixpkgs;});
+            settings-module = settings.module;
+          };
         };
         homeModules.stylix = stylix-module;
         homeModules.config = {
-          lib,
           config,
           pkgs,
           ...
         }:
-          with lib; let
+          with nixpkgs.lib; let
             cfg = config.programs.niri;
           in {
             imports = [
@@ -338,7 +367,7 @@
             options.programs.niri = {
               package = mkOption {
                 type = types.package;
-                default = make-niri-stable pkgs;
+                default = package-set.niri-stable pkgs;
               };
             };
 
@@ -407,7 +436,6 @@
               ];
           };
         nixosModules.niri = {
-          lib,
           config,
           options,
           pkgs,
@@ -415,12 +443,12 @@
         }: let
           cfg = config.programs.niri;
         in
-          with lib; {
+          with nixpkgs.lib; {
             options.programs.niri = {
               enable = mkEnableOption "niri";
               package = mkOption {
                 type = types.package;
-                default = make-niri-stable pkgs;
+                default = package-set.niri-stable pkgs;
               };
             };
 
@@ -447,12 +475,20 @@
               }
               (mkIf cfg.enable {
                 services =
-                  if config.system.nixos.release == "24.05"
+                  if nixpkgs.lib.strings.versionAtLeast config.system.nixos.release "24.05"
                   then {
                     displayManager.sessionPackages = [cfg.package];
                   }
                   else {
                     xserver.displayManager.sessionPackages = [cfg.package];
+                  };
+                hardware =
+                  if nixpkgs.lib.strings.versionAtLeast config.system.nixos.release "24.11"
+                  then {
+                    graphics.enable = mkDefault true;
+                  }
+                  else {
+                    opengl.enable = mkDefault true;
                   };
               })
               (mkIf cfg.enable {
@@ -480,7 +516,6 @@
                 };
 
                 security.pam.services.swaylock = {};
-                hardware.opengl.enable = mkDefault true;
                 programs.dconf.enable = mkDefault true;
                 fonts.enableDefaultPackages = mkDefault true;
               })
@@ -495,12 +530,11 @@
             ];
           };
         homeModules.niri = {
-          lib,
           config,
           pkgs,
           ...
         }:
-          with lib; let
+          with nixpkgs.lib; let
             cfg = config.programs.niri;
           in {
             imports = [
